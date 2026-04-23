@@ -182,6 +182,11 @@ public:
             float tex_h = 0.0f;
             Helper::SDL_QueryTexture(tex, &tex_w, &tex_h);
 
+            float x_scale = glm::abs(request.scale_x);
+            float y_scale = glm::abs(request.scale_y);
+            tex_w *= x_scale;
+            tex_h *= y_scale;
+
             SDL_FRect tex_rect = { request.x, request.y, tex_w, tex_h };
 
             SDL_SetTextureColorMod(tex, request.r, request.g, request.b);

@@ -195,6 +195,28 @@ static void CppImageDrawUIEx(const std::string& image_name, float x, float y, fl
     s_image_db->QueueUIDraw(req);
 }
 
+static void CppImageDrawUIScaled(const std::string& image_name, float x, float y,
+                                 float scale_x, float scale_y,
+                                 float r, float g, float b, float a,
+                                 float sorting_order) {
+    if (!s_image_db) return;
+    ImageDrawRequest req;
+    req.image_name = image_name;
+    req.x = x;
+    req.y = y;
+    req.rotation_degrees = 0;
+    req.scale_x = scale_x;
+    req.scale_y = scale_y;
+    req.pivot_x = 0.5f;
+    req.pivot_y = 0.5f;
+    req.r = static_cast<int>(r);
+    req.g = static_cast<int>(g);
+    req.b = static_cast<int>(b);
+    req.a = static_cast<int>(a);
+    req.sorting_order = static_cast<int>(sorting_order);
+    s_image_db->QueueUIDraw(req);
+}
+
 static void CppImageDrawPixel(float x, float y, float r, float g, float b, float a) {
     if (!s_image_db) return;
     PixelDrawRequest req;
@@ -638,6 +660,7 @@ void ComponentDB::Initialize() {
       .beginNamespace("Image")
       .addFunction("DrawUI", CppImageDrawUI)
       .addFunction("DrawUIEx", CppImageDrawUIEx)
+      .addFunction("DrawUIScaled", CppImageDrawUIScaled)
       .addFunction("Draw", CppImageDraw)
       .addFunction("DrawEx", CppImageDrawEx)
       .addFunction("DrawPixel", CppImageDrawPixel)
