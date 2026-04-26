@@ -1,0 +1,919 @@
+================================================================================
+ GAGOA GAME ENGINE — TECHNICAL DOCUMENTATION
+================================================================================
+
+ Author : Armand Gago
+ Language : C++17 core, Lua 5.4 scripting layer
+ Genre   : Data-driven 2D game engine (component / actor model)
+
+--------------------------------------------------------------------------------
+ TABLE OF CONTENTS
+--------------------------------------------------------------------------------
+  1.  Engine overview
+  2.  Technologies used
+  3.  Project layout
+  4.  Configuration files (game.config, rendering.config)
+  5.  Core concepts (Actors, Components, Scenes, Templates)
+  6.  Engine main loop / lifecycle order
+  7.  Lua API reference
+        7.1  Debug
+        7.2  Application
+        7.3  Input
+        7.4  Text
+        7.5  Image
+        7.6  Audio
+        7.7  Camera
+        7.8  Scene
+        7.9  Event
+        7.10 Physics
+        7.11 Actor
+        7.12 Vector2 / vec2
+        7.13 Rigidbody (built-in component)
+        7.14 ParticleSystem (built-in component)
+        7.15 HotReload
+  8.  Lua component lifecycle callbacks
+  9.  Collision events (OnCollision*, OnTrigger*)
+ 10.  Coordinate system, units, rendering pipeline
+ 11.  Audio model
+ 12.  Input model and supported keycodes
+ 13.  Hot-reload of Lua components
+ 14.  How to make a game (step-by-step tutorial)
+ 15.  Example: minimal player-controlled game
+ 16.  Performance notes and best practices
+
+
+================================================================================
+ 1. ENGINE OVERVIEW
+================================================================================
+
+The Gagoa engine is a small but feature-complete 2D game engine written in
+C++17. The runtime exposes its functionality to user code through Lua, so an
+entire game can be built without recompiling the engine — only resource files
+(scenes, templates, components, images, audio, fonts, configs) need to ship.
+
+Key features:
+
+  * Actor / Component data-driven architecture (Unity-style)
+  * Lua scripted components with hot-reload
+  * Box2D physics (rigidbodies, colliders, triggers, raycasts)
+  * SDL2-based renderer with camera (position, zoom)
+  * Sprite + text + raw-pixel rendering with sorting orders
+  * UI / world space drawing distinction
+  * Particle system as a built-in component
+  * Audio via SDL2_mixer (multiple channels, looping, per-channel volume)
+  * JSON-based scenes and actor templates (RapidJSON)
+  * Global event bus (publish / subscribe between components)
+  * Persistent "DontDestroy" actors across scene loads
+  * Cross-platform builds (Windows / macOS / Linux) via CMake
+
+
+================================================================================
+ 2. TECHNOLOGIES USED
+================================================================================
+
+Core / language
+  * C++17                          - engine implementation language
+  * Lua 5.4                        - scripting language for game logic
+  * LuaBridge3                     - C++ <-> Lua binding layer
+
+Graphics, audio, input, text
+  * SDL2                           - windowing, input, 2D rendering
+  * SDL2_image                     - PNG texture loading
+  * SDL2_mixer                     - WAV / OGG audio playback
+  * SDL2_ttf                       - TrueType text rendering
+
+Physics
+  * Box2D 2.4.1                    - rigidbodies, colliders, triggers,
+                                      contact callbacks, raycasts
+
+Math / utility
+  * GLM (header-only)              - vec2 / ivec2 math used in renderer
+  * RapidJSON 1.1.0                - JSON parsing for configs, scenes,
+                                      templates
+
+Build / tooling
+  * CMake (>= 3.16)                - cross-platform build system
+  * Make / Xcode / MSVC            - supported back-ends
+  * Git                            - version control
+
+Asset formats
+  * .png                           - sprites & UI images
+  * .wav / .ogg                    - audio clips
+  * .ttf                           - TrueType fonts
+  * .scene  (JSON)                 - scene definitions
+  * .template (JSON)               - actor templates
+  * .lua                           - component scripts
+  * .config (JSON)                 - engine configuration
+
+Platforms
+  * macOS (frameworks, Xcode / CMake)
+  * Windows (MSVC + .vcxproj or CMake)
+  * Linux (CMake + system SDL2 packages)
+
+
+================================================================================
+ 3. PROJECT LAYOUT
+================================================================================
+
+  game_engine_gagoa/
+    main.cpp, Engine.cpp/.hpp        - app entry + main loop
+    SceneDB.cpp/.hpp                 - scene + actor lifecycle
+    TemplateDB.cpp/.hpp              - actor templates
+    ComponentDB.cpp/.hpp             - Lua bindings, event bus, hot reload
+    ParticleSystem.cpp/.hpp          - particle system component
+    Rigidbody.h                      - Box2D wrapper component
+    ImageDB.h, TextDB.h, AudioDB.h   - asset / draw queues
+    Renderer.h                       - SDL window + camera
+    Input.h                          - keyboard + mouse polling
+    Helper.h, EngineUtils.cpp/.hpp   - small utilities
+    Collision.h                      - struct passed to OnCollision* / OnTrigger*
+
+    third_party/                     - lua, glm, luabridge
+    rapidjson-1.1.0/                 - JSON
+    box2d-2.4.1/                     - physics
+    SDL2/, SDL_image/, SDL_mixer/,
+    SDL2_ttf/                        - SDL frameworks/headers/libs
+
+    resources/                       - the only thing your game ships with
+      game.config                    - global game config
+      rendering.config               - window + clear color
+      scenes/         *.scene        - scene files (JSON)
+      actor_templates/ *.template    - reusable actor blueprints (JSON)
+      component_types/ *.lua         - Lua component classes
+      images/          *.png         - sprites
+      audio/           *.wav|*.ogg   - sound effects / music
+      fonts/           *.ttf         - TrueType fonts
+
+
+================================================================================
+ 4. CONFIGURATION FILES
+================================================================================
+
+resources/game.config (REQUIRED)
+  {
+      "game_title":    "My Game",
+      "initial_scene": "main_menu"
+  }
+
+  * game_title    : window title.
+  * initial_scene : name (without .scene) of the first scene to load.
+
+resources/rendering.config (OPTIONAL, defaults shown)
+  {
+      "x_resolution":   640,
+      "y_resolution":   360,
+      "clear_color_r":  255,
+      "clear_color_g":  255,
+      "clear_color_b":  255
+  }
+
+  * x_resolution / y_resolution  : window size in pixels.
+  * clear_color_r/g/b            : background clear color (0-255 each).
+
+
+================================================================================
+ 5. CORE CONCEPTS
+================================================================================
+
+Actor
+  * The fundamental "thing" in a scene. Has a name, an id, and a map of
+    components.
+  * Created either:
+       - by listing it in a .scene file, or
+       - by calling Actor.Instantiate(template_name) at runtime.
+  * Destroyed with Actor.Destroy(actor).
+  * Can be marked Scene.DontDestroy(actor) to survive scene transitions.
+
+Component
+  * A piece of behavior or data attached to an actor.
+  * Three flavors:
+       1. Built-in C++ components: "Rigidbody", "ParticleSystem"
+          (exposed as bound Lua userdata classes).
+       2. Lua components: any .lua file in resources/component_types/
+          whose top-level table is named the same as the file
+          (e.g. Player.lua -> defines a global table `Player`).
+       3. Implicitly available via SpriteRenderer.lua, Enemy.lua, etc. —
+          there is no "engine-side" sprite-renderer; it's a Lua component.
+  * Each component instance is a Lua table (or userdata for built-ins) and
+    inherits from its base table via metatable __index.
+
+Template (resources/actor_templates/<name>.template, JSON)
+  Reusable blueprint:
+    {
+      "name": "Enemy",
+      "components": {
+        "1": { "type": "Rigidbody", "body_type": "dynamic", ... },
+        "2": { "type": "SpriteRenderer", "sprite": "enemy_basic", ... },
+        "3": { "type": "Enemy", "max_hp": 10, "speed": 1.5 }
+      }
+    }
+  Component keys ("1","2","3" above) are arbitrary strings; they uniquely
+  identify the component on the actor for GetComponentByKey().
+
+Scene (resources/scenes/<name>.scene, JSON)
+  {
+    "actors": [
+      { "template": "Enemy", "components": { "3": { "max_hp": 50 } } },
+      { "name":   "Player",
+        "components": {
+          "1": { "type": "Rigidbody", "body_type": "dynamic" },
+          "2": { "type": "SpriteRenderer", "sprite": "player" },
+          "3": { "type": "PlayerController" }
+        }
+      }
+    ]
+  }
+
+  * `template` is optional. If present, the actor inherits all components
+    from that template; per-actor `components` overrides / extends fields.
+  * `name` is also optional (falls back to the template's name).
+
+
+================================================================================
+ 6. ENGINE MAIN LOOP (per-frame order)
+================================================================================
+
+Every frame the engine performs, in order:
+
+  1.  Pump SDL events into Input:: (keyboard, mouse, scroll, quit).
+  2.  If a scene load is pending: call OnDestroy on every non-DontDestroy
+      actor's components, then load the new scene.
+  3.  Process actors_to_start  -> call OnStart on every component of newly
+      created actors (from scene load or Actor.Instantiate).
+  4.  Process components_to_start -> OnStart for components added at
+      runtime via actor:AddComponent().
+  5.  Iterate every actor, every component -> call OnUpdate.
+  6.  Iterate every actor, every component -> call OnLateUpdate.
+  7.  Run OnDestroy on components flagged for removal this frame and on
+      destroyed actors.
+  8.  Finalize end-of-frame:
+        - actually delete removed components,
+        - actually delete destroyed actors,
+        - splice in pending newly-added components.
+  9.  Process pending event-bus subscribe / unsubscribe operations.
+  10. Poll Lua hot-reload watcher (every ~15 frames).
+  11. Step Box2D world at fixed 1/60 s, 8 vel iters, 3 pos iters.
+  12. Clear screen, render scene images (sorted), render UI images
+      (sorted), render text, render pixel draws.
+  13. Present frame, advance Input "just-pressed" -> "down" state.
+
+This is important: collision callbacks (OnCollisionEnter/Exit, OnTriggerEnter/
+Exit) are dispatched *during* the Box2D world step from step 11, but because
+of frame ordering you generally see them on the *next* frame's update.
+
+
+================================================================================
+ 7. LUA API REFERENCE
+================================================================================
+
+All APIs live in global Lua namespaces. Coordinates are in *world meters*
+unless explicitly noted as UI or pixel coordinates.
+
+
+----------------------------------------------------------------------
+ 7.1  Debug
+----------------------------------------------------------------------
+  Debug.Log(message : string)
+        Print to stdout with a newline. Prefer this over Lua's print().
+
+
+----------------------------------------------------------------------
+ 7.2  Application
+----------------------------------------------------------------------
+  Application.Quit()                       -- terminates the program (exit 0)
+  Application.Sleep(ms : int)              -- blocking sleep
+  Application.GetFrame() : int             -- current frame number
+  Application.OpenURL(url : string)        -- launches default browser
+
+
+----------------------------------------------------------------------
+ 7.3  Input
+----------------------------------------------------------------------
+  Input.GetKey(keycode : string) : bool          -- held this frame
+  Input.GetKeyDown(keycode : string) : bool      -- pressed this frame
+  Input.GetKeyUp(keycode : string) : bool        -- released this frame
+  Input.GetMousePosition() : vec2                -- in screen pixels
+  Input.GetMouseButton(btn : int) : bool         -- 1=L,2=M,3=R
+  Input.GetMouseButtonDown(btn) : bool
+  Input.GetMouseButtonUp(btn) : bool
+  Input.GetMouseScrollDelta() : float            -- +up / -down this frame
+  Input.HideCursor()                             -- hides system cursor
+  Input.ShowCursor()
+
+
+----------------------------------------------------------------------
+ 7.4  Text
+----------------------------------------------------------------------
+  Text.Draw(content : string,
+            x : float, y : float,                -- top-left in pixels
+            font_name : string,                  -- file in resources/fonts/
+            font_size : int,
+            r, g, b, a : 0..255)
+
+  Drawn at the END of the frame, on top of scene/UI images.
+
+
+----------------------------------------------------------------------
+ 7.5  Image
+----------------------------------------------------------------------
+  Images live in resources/images/<name>.png. Names are referenced WITHOUT
+  the .png extension. Three coordinate spaces are supported:
+
+  -- WORLD SPACE (camera-affected, scene_image_queue) --
+
+  Image.Draw(image_name, x, y)
+        Draw at (x,y) world meters with default scale 1, pivot center.
+
+  Image.DrawEx(image_name,
+               x, y,                        -- world meters
+               rotation_degrees,
+               scale_x, scale_y,            -- negative flips on that axis
+               pivot_x, pivot_y,            -- 0..1 within image (0.5,0.5=center)
+               r, g, b, a,                  -- 0..255
+               sorting_order)               -- higher = drawn later
+
+  -- UI SPACE (no camera, ui_image_queue, x/y are PIXELS, top-left) --
+
+  Image.DrawUI(image_name, x, y)
+        x,y are screen-space pixels for the image's top-left corner.
+
+  Image.DrawUIEx(image_name, x, y, r, g, b, a, sorting_order)
+        Same as DrawUI plus tint, alpha, and sorting order.
+
+  Image.DrawUIScaled(image_name, x, y, scale_x, scale_y, r, g, b, a,
+                     sorting_order)
+        UI draw with scale. (NOTE: pivot is fixed at 0.5,0.5 internally
+        but because UI never applies camera transforms the visible result
+        is that x,y act as the top-left of the *unscaled* corner; for
+        full-screen overlays use (0,0).)
+
+  -- DIRECT PIXEL --
+
+  Image.DrawPixel(x, y, r, g, b, a)
+        Single pixel, drawn last (above everything else).
+        Useful for procedural lines / debug shapes.
+
+
+----------------------------------------------------------------------
+ 7.6  Audio
+----------------------------------------------------------------------
+  Channels are integers 0..49 (50 channels are pre-allocated).
+
+  Audio.Play(channel : int, clip_name : string, does_loop : bool)
+        Plays resources/audio/<clip_name>.wav or .ogg on `channel`.
+        Pass `true` for does_loop to loop forever.
+
+  Audio.Halt(channel : int)
+        Stop whatever is playing on that channel.
+
+  Audio.SetVolume(channel : int, volume : float)
+        0..128, controlling that channel's mix volume.
+
+
+----------------------------------------------------------------------
+ 7.7  Camera
+----------------------------------------------------------------------
+  Camera.SetPosition(x : float, y : float)     -- world meters, center of view
+  Camera.GetPositionX() : float
+  Camera.GetPositionY() : float
+  Camera.SetZoom(zoom : float)                 -- 1=default, >1=zoom in
+  Camera.GetZoom() : float
+
+  At zoom 1 the world is rendered at 100 pixels per meter and the camera
+  is centered on (camera_x, camera_y).
+
+
+----------------------------------------------------------------------
+ 7.8  Scene
+----------------------------------------------------------------------
+  Scene.Load(scene_name : string)
+        Queue a scene transition. Happens at the START of the next frame.
+        All components on non-DontDestroy actors get OnDestroy first.
+
+  Scene.GetCurrent() : string
+        Returns the name of the currently loaded scene.
+
+  Scene.DontDestroy(actor)
+        Marks the actor so it survives Scene.Load. Useful for music
+        managers, persistent UI, save data carriers, etc.
+
+
+----------------------------------------------------------------------
+ 7.9  Event (global event bus)
+----------------------------------------------------------------------
+  Event.Publish(event_type : string, payload : any)
+        Synchronously calls every subscribed function with
+        (component_self, payload).
+
+  Event.Subscribe(event_type : string, component, function)
+        component is the table you want to be `self` inside the callback;
+        function is the function reference (e.g. self.OnEnemyDied).
+
+  Event.Unsubscribe(event_type : string, component, function)
+
+  IMPORTANT: subscribes/unsubscribes are deferred until the end of the
+  frame — you can safely subscribe inside a published callback without
+  invalidating the iteration. Subscriptions are NOT cleared automatically
+  between scene loads — unsubscribe in OnDestroy if the component should
+  not be reactivated by stale events on a new scene.
+
+
+----------------------------------------------------------------------
+ 7.10  Physics
+----------------------------------------------------------------------
+  Physics.Raycast(origin : Vector2, direction : Vector2, distance : float)
+        Returns a HitResult or nil. Closest non-phantom hit.
+
+  Physics.RaycastAll(origin, direction, distance)
+        Returns a Lua table of HitResults sorted by distance (closest first).
+
+  HitResult fields (read-only):
+        .actor               -- Actor that was hit
+        .point   : Vector2   -- world-space hit position
+        .normal  : Vector2   -- surface normal at hit
+        .is_trigger : bool   -- true if the hit fixture is a sensor/trigger
+
+
+----------------------------------------------------------------------
+ 7.11  Actor
+----------------------------------------------------------------------
+  Actor.Find(name : string) : Actor or nil
+        Returns the first non-destroyed actor with the given name.
+
+  Actor.FindAll(name : string) : Lua table (1-indexed) of actors
+
+  Actor.Instantiate(template_name : string) : Actor
+        Spawns from an actor template. OnStart on all of its components
+        runs at the start of the next frame.
+
+  Actor.Destroy(actor)
+        Marks the actor destroyed. Disables all its components, calls
+        OnDestroy on them, then frees memory at end of frame.
+
+  Actor methods (Lua side):
+        actor:GetName() : string
+        actor:GetID()   : int
+        actor:GetComponentByKey(key : string) -- key from the template
+        actor:GetComponent(type_name : string)      -- first one of that type
+        actor:GetComponents(type_name : string)     -- all of that type, table
+        actor:AddComponent(type_name : string)      -- adds at end of frame
+        actor:RemoveComponent(component)            -- removes at end of frame
+
+  Convenience reference: every component receives `self.actor` set to its
+  owning actor at creation time. So `self.actor:GetComponent("Rigidbody")`
+  is the typical way to fetch a sibling component.
+
+
+----------------------------------------------------------------------
+ 7.12  Vector2 / vec2
+----------------------------------------------------------------------
+  Vector2(x : float, y : float)             -- constructor (b2Vec2 under hood)
+        v.x, v.y                            -- read/write fields
+        v:Length() : float
+        v:Normalize()                       -- in place, no return
+        v + v2, v - v2, v * scalar          -- operators
+
+  Vector2.Distance(a, b) : float
+  Vector2.Dot(a, b)      : float
+
+  vec2 (returned by Input.GetMousePosition()) is a glm::vec2 with
+  .x and .y read-only properties. Treat it as a pair of floats.
+
+
+----------------------------------------------------------------------
+ 7.13  Rigidbody (built-in component, type = "Rigidbody")
+----------------------------------------------------------------------
+  Defaults are sensible for a 1m x 1m dynamic box.
+
+  Properties (all readable/writable from Lua):
+    enabled            (bool)
+    x, y               (float, world meters at OnStart only — after OnStart
+                        position lives inside Box2D; use SetPosition / GetPosition)
+    body_type          ("dynamic" | "static" | "kinematic")
+    precise            (bool, true = continuous collision detection)
+    gravity_scale      (float)
+    density            (float)
+    angular_friction   (float, Box2D angularDamping)
+    rotation           (degrees clockwise; only honored before OnStart)
+    collider_type      ("box" | "circle")
+    width, height      (box collider half-extents are computed from these)
+    radius             (circle collider radius)
+    friction           (float, 0..1ish)
+    bounciness         (float, 0..1ish)  -- aka restitution
+    has_collider       (bool)            -- if false and has_trigger=false, a
+                                           phantom non-colliding fixture is added
+    trigger_type       ("box" | "circle")
+    trigger_width, trigger_height, trigger_radius
+    has_trigger        (bool)
+
+  Methods:
+    GetPosition()             : Vector2
+    GetRotation()             : float (degrees)
+    GetVelocity()             : Vector2
+    GetAngularVelocity()      : float (deg/sec)
+    GetGravityScale()         : float
+    GetUpDirection()          : Vector2  (sin(a), -cos(a))
+    GetRightDirection()       : Vector2  (cos(a),  sin(a))
+    AddForce(force : Vector2)
+    SetVelocity(v : Vector2)
+    SetPosition(p : Vector2)
+    SetRotation(deg : float)
+    SetAngularVelocity(deg_per_sec : float)
+    SetGravityScale(s : float)
+    SetUpDirection(dir : Vector2)
+    SetRightDirection(dir : Vector2)
+
+  Collision filters (internal, not exposed to Lua):
+    Solid colliders: category 0x0001, mask 0x0001
+    Trigger fixtures: category 0x0002, mask 0x0002
+    Phantom fixtures (no collider, no trigger): category 0x0004, mask 0
+    -> Solids never collide with triggers; raycasts ignore phantoms.
+
+
+----------------------------------------------------------------------
+ 7.14  ParticleSystem (built-in component, type = "ParticleSystem")
+----------------------------------------------------------------------
+  Self-contained system that emits particles from (x,y) every
+  frames_between_bursts.
+
+  Position / emission shape:
+    x, y                     (world meters; can be set every frame from
+                              an owning Rigidbody for "follow me" behavior)
+    emit_angle_min/max       (degrees; 0 = right, 90 = down)
+    emit_radius_min/max      (meters; particles spawn on a ring/disc)
+
+  Timing / count:
+    frames_between_bursts    (int >= 1)
+    burst_quantity           (int >= 1)
+    duration_frames          (lifetime per particle)
+
+  Visuals:
+    image                    (sprite name, "" = procedural 8x8 white)
+    sorting_order            (int)
+    start_scale_min/max
+    end_scale                (set < 0 to disable interpolation; default -1)
+    rotation_min/max
+    start_color_r/g/b/a      (0..255)
+    end_color_r/g/b/a        (-1 disables that channel's interpolation)
+
+  Motion:
+    start_speed_min/max      (meters/frame)
+    rotation_speed_min/max   (degrees/frame)
+    gravity_scale_x          (acceleration each frame)
+    gravity_scale_y
+    drag_factor              (velocity multiplier per frame, 1 = no drag)
+    angular_drag_factor
+
+  Methods (callable from Lua):
+    ps:Stop()                 -- pauses automatic emission (manual Burst still works)
+    ps:Play()                 -- resumes automatic emission
+    ps:Burst()                -- enqueue one extra burst this frame
+
+
+----------------------------------------------------------------------
+ 7.15  HotReload
+----------------------------------------------------------------------
+  HotReload.ReloadLuaComponent(typeName : string) : bool
+        Force-reload the Lua file resources/component_types/<typeName>.lua.
+
+  In addition, the engine polls the component_types folder every ~15
+  frames and automatically re-runs files whose mtime changed. New
+  instances pick up the new behavior; existing instances continue to
+  inherit from the (now updated) base table.
+
+
+================================================================================
+ 8. LUA COMPONENT LIFECYCLE CALLBACKS
+================================================================================
+
+A Lua component is just a table. Define any subset of these functions:
+
+    OnStart(self)
+        Called once, on the frame after the actor / component is created.
+
+    OnUpdate(self)
+        Called every frame, in actor + component creation order.
+
+    OnLateUpdate(self)
+        Called every frame, AFTER all OnUpdate calls of that frame have
+        completed. Good for camera follow logic, post-process UI.
+
+    OnCollisionEnter(self, collision)
+        Called when this actor's solid collider begins touching another
+        actor's solid collider.
+
+    OnCollisionExit(self, collision)
+
+    OnTriggerEnter(self, collision)
+        Called when this actor's trigger overlaps another actor's trigger.
+        Solid<->trigger combinations do NOT fire either callback (by design).
+
+    OnTriggerExit(self, collision)
+
+    OnDestroy(self)
+        Called immediately before the component is freed, either because
+        the actor was destroyed, the component was removed via
+        actor:RemoveComponent, or a scene transition is about to clear
+        the actor.
+
+The `self.actor` field is auto-injected so every component can find its
+owner: `self.actor:GetComponent("Rigidbody"):GetPosition()` etc.
+
+A minimal Lua component file (resources/component_types/Spinner.lua):
+
+    Spinner = {
+        speed_deg = 90,         -- default; may be overridden in template
+
+        OnStart = function(self)
+            self.rb = self.actor:GetComponent("Rigidbody")
+        end,
+
+        OnUpdate = function(self)
+            if self.rb ~= nil then
+                self.rb:SetAngularVelocity(self.speed_deg)
+            end
+        end,
+    }
+
+The TOP-LEVEL TABLE NAME ("Spinner") MUST EQUAL THE FILENAME (Spinner.lua).
+The engine refuses to start otherwise.
+
+
+================================================================================
+ 9. COLLISION EVENTS
+================================================================================
+
+The Collision struct passed to OnCollision* / OnTrigger* exposes:
+
+    .other              (Actor)    -- the other actor in the contact
+    .point              (Vector2)  -- contact point in world meters,
+                                      or (-999,-999) for triggers / Exit
+    .relative_velocity  (Vector2)  -- A.vel - B.vel
+    .normal             (Vector2)  -- contact normal,
+                                      or (-999,-999) for triggers / Exit
+
+Both actors involved in a contact receive a callback (each sees the other
+in `.other`).
+
+
+================================================================================
+ 10. COORDINATE SYSTEM, UNITS, RENDERING PIPELINE
+================================================================================
+
+  * 1 world meter = 100 pixels at zoom 1.
+  * X axis points right, Y axis points DOWN (Box2D's convention is also
+    +Y down because gravity is set to (0, +9.8)).
+  * Camera position is the world-space point that maps to the center of
+    the screen.
+  * Render order each frame:
+        1. Clear screen with config color.
+        2. Scene images: sorted by sorting_order asc, drawn with camera
+           transform + zoom scaling.
+        3. UI images: sorted by sorting_order asc, drawn in raw screen
+           pixels (no camera).
+        4. Text: drawn over both image layers, in pixels.
+        5. Pixel draws (Image.DrawPixel): drawn last.
+  * Sprite rendering supports negative scales for flipping along that
+    axis (kept in code as SDL_FLIP_HORIZONTAL / VERTICAL).
+
+
+================================================================================
+ 11. AUDIO MODEL
+================================================================================
+
+  * 50 mixer channels are allocated at startup.
+  * Calling Audio.Play(channel, clip, loop) on a channel that's already
+    playing will REPLACE the current sound on that channel.
+  * Music is just a looped Audio.Play; reserve a dedicated channel
+    (e.g. channel 0) for it so SFX never interrupt the song.
+  * Files are looked up as resources/audio/<clip>.wav, falling back to
+    resources/audio/<clip>.ogg.
+  * Loaded chunks are cached for the session.
+
+
+================================================================================
+ 12. INPUT MODEL
+================================================================================
+
+  * State per key/button: UP, JUST_BECAME_DOWN, DOWN, JUST_BECAME_UP.
+  * GetKeyDown / GetKeyUp fire ONCE on the appropriate transition frame.
+  * GetKey returns true while held (DOWN or JUST_BECAME_DOWN).
+
+Supported keycode strings:
+
+  Arrows / control:  "up", "down", "left", "right",
+                     "escape", "tab", "return"/"enter",
+                     "backspace", "delete", "insert", "space",
+                     "home", "end", "pageup", "pagedown",
+                     "lshift","rshift","lctrl","rctrl","lalt","ralt",
+                     "capslock"
+  Letters:           "a" .. "z"
+  Numbers:           "0" .. "9"
+  Symbols:           "/", ";", "=", "-", ".", ",",
+                     "[", "]", "\\", "'", "`"
+  Function keys:     "f1" .. "f8"
+
+Mouse:
+  Buttons: 1 = left, 2 = middle, 3 = right
+  GetMousePosition()   returns screen pixel coords with +Y down.
+  GetMouseScrollDelta() returns vertical scroll for this frame.
+
+
+================================================================================
+ 13. HOT-RELOAD OF LUA COMPONENTS
+================================================================================
+
+While the game is running, save a file inside
+resources/component_types/. Within ~15 frames the engine notices the
+mtime change and re-executes the file. Any existing instances keep their
+data fields but immediately use the new function bodies (because
+inheritance goes through __index of the freshly-replaced base table).
+
+You can also force a reload manually:
+
+    HotReload.ReloadLuaComponent("Player")
+
+
+================================================================================
+ 14. HOW TO MAKE A GAME (STEP BY STEP)
+================================================================================
+
+Step 1 — Project skeleton
+  Create a `resources/` folder next to the engine binary with these
+  subfolders: scenes/ actor_templates/ component_types/ images/ audio/
+  fonts/
+
+Step 2 — Configs
+  resources/game.config:
+    {
+      "game_title": "My Game",
+      "initial_scene": "main"
+    }
+  resources/rendering.config:
+    {
+      "x_resolution": 960,
+      "y_resolution": 540,
+      "clear_color_r": 12, "clear_color_g": 12, "clear_color_b": 18
+    }
+
+Step 3 — Add at least one font
+  Drop something like NotoSans-Regular.ttf into resources/fonts/.
+  Refer to it without the extension when calling Text.Draw().
+
+Step 4 — Create your first scene
+  resources/scenes/main.scene:
+    {
+      "actors": [
+        { "name": "Camera",
+          "components": {
+            "1": { "type": "CameraControl" }
+          }
+        },
+        { "name": "Player",
+          "components": {
+            "1": { "type": "Rigidbody", "body_type": "dynamic",
+                   "x": 0, "y": 0, "gravity_scale": 0.0,
+                   "collider_type": "circle", "radius": 0.4 },
+            "2": { "type": "SpriteRenderer", "sprite": "player",
+                   "scale_x": 0.05, "scale_y": 0.05, "sorting_order": 5 },
+            "3": { "type": "PlayerController", "speed": 3.0 }
+          }
+        }
+      ]
+    }
+
+Step 5 — Write Lua components
+  Each .lua filename equals the global table name it defines. Use
+  OnStart / OnUpdate / OnLateUpdate / OnCollisionEnter / etc. See
+  section 8 and the example in section 15.
+
+Step 6 — Add reusable templates
+  resources/actor_templates/Bullet.template:
+    {
+      "name": "Bullet",
+      "components": {
+        "1": { "type": "Rigidbody", "body_type": "dynamic",
+               "gravity_scale": 0, "collider_type": "circle", "radius": 0.1,
+               "has_trigger": true, "trigger_radius": 0.1 },
+        "2": { "type": "SpriteRenderer", "sprite": "bullet" },
+        "3": { "type": "Bullet", "lifetime": 90, "speed": 12 }
+      }
+    }
+
+  Spawn from Lua: local b = Actor.Instantiate("Bullet").
+
+Step 7 — Use scenes for game flow
+  Make scenes for menu / game / game_over and call
+  Scene.Load("...") from buttons or game-state code.
+
+Step 8 — Persist data across scenes
+  Either:
+    * use a global Lua variable (TD_BACKSTORY_SEEN style), or
+    * call Scene.DontDestroy(actor) on a manager actor at OnStart and
+      reference its components from new scenes via Actor.Find("Manager").
+
+Step 9 — Polish
+  Tune sorting_order so UI > player > enemies > terrain.
+  Use a dedicated audio channel for music (so SFX don't replace it).
+  Use Camera.SetPosition / SetZoom for camera behavior in OnLateUpdate.
+
+Step 10 — Ship
+  Distribute the engine binary plus the resources/ folder. No
+  recompile is needed for content changes.
+
+
+================================================================================
+ 15. EXAMPLE — MINIMAL PLAYER-CONTROLLED GAME
+================================================================================
+
+resources/component_types/PlayerController.lua
+
+    PlayerController = {
+        speed = 3.0,                   -- meters/sec
+        OnStart = function(self)
+            self.rb = self.actor:GetComponent("Rigidbody")
+        end,
+
+        OnUpdate = function(self)
+            local vx, vy = 0, 0
+            if Input.GetKey("a") or Input.GetKey("left")  then vx = vx - 1 end
+            if Input.GetKey("d") or Input.GetKey("right") then vx = vx + 1 end
+            if Input.GetKey("w") or Input.GetKey("up")    then vy = vy - 1 end
+            if Input.GetKey("s") or Input.GetKey("down")  then vy = vy + 1 end
+
+            local len = math.sqrt(vx*vx + vy*vy)
+            if len > 0 then vx, vy = vx/len, vy/len end
+
+            self.rb:SetVelocity(Vector2(vx * self.speed, vy * self.speed))
+
+            if Input.GetKeyDown("space") then
+                local b = Actor.Instantiate("Bullet")
+                local p = self.rb:GetPosition()
+                b:GetComponent("Rigidbody"):SetPosition(Vector2(p.x, p.y))
+                b:GetComponent("Rigidbody"):SetVelocity(Vector2(0, -10))
+            end
+        end,
+
+        OnLateUpdate = function(self)
+            local p = self.rb:GetPosition()
+            Camera.SetPosition(p.x, p.y)         -- camera follows player
+        end,
+    }
+
+resources/component_types/Bullet.lua
+
+    Bullet = {
+        lifetime = 90,
+        OnStart = function(self)
+            self.frames = 0
+        end,
+
+        OnUpdate = function(self)
+            self.frames = self.frames + 1
+            if self.frames >= self.lifetime then
+                Actor.Destroy(self.actor)
+            end
+        end,
+
+        OnTriggerEnter = function(self, collision)
+            if collision.other:GetName() == "Enemy" then
+                Actor.Destroy(collision.other)
+                Actor.Destroy(self.actor)
+            end
+        end,
+    }
+
+
+================================================================================
+ 16. PERFORMANCE NOTES & BEST PRACTICES
+================================================================================
+
+  * Image textures are cached forever (until process exit). Load them by
+    drawing once at startup so the first in-game draw is hitch-free.
+
+  * Audio chunks are also cached. The first Audio.Play of a clip incurs
+    the disk read.
+
+  * Avoid creating Lua tables every frame inside OnUpdate; reuse fields
+    on `self`.
+
+  * Use sorting_order intentionally — terrain ~0, props ~5, actors ~10,
+    projectiles ~15, particles ~20, world UI ~50, fullscreen UI 1000+.
+
+  * Subscribe to events sparingly. Subscriptions persist across scene
+    loads; unsubscribe in OnDestroy or guard your handler with a
+    "destroyed" flag.
+
+  * Box2D runs at fixed 60 Hz internally regardless of render rate.
+
+  * The renderer is VSYNC + accelerated by default.
+
+  * Camera.SetZoom < 1 zooms out (more world visible); > 1 zooms in.
+
+  * Negative scale_x / scale_y on a sprite mirrors it horizontally /
+    vertically — handy for facing direction without separate sprites.
+
+
+================================================================================
+ END OF DOCUMENT
+================================================================================
